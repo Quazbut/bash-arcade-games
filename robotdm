@@ -1,0 +1,1079 @@
+#!/bin/bash
+#
+# Robot Deathmatch, now with shrubs! Requires Bash v4.2 or newer.
+#
+# MIT License
+#
+# Copyright (c)2025 Quazbut (Jon Hay)
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
+
+# Constants ========================================================================================
+
+_title="Robot Deathmatch"
+_ver="2.31"
+
+_name=$(basename "$0")
+_path=$(dirname "$0")
+
+score_file="$_path/scores.rdm"
+
+# Game pieces.
+player="]["
+robot="dP"
+junk="%$"
+shrub="@@"
+crushed="%&"
+splat="##"
+wall="::"
+
+# Game colors.
+declare -A colors
+colors[$player]="\e[30;43m"		# Black on yellow
+colors[$robot]="\e[1;34;40m"	# Bright blue on black
+colors[$junk]="\e[36;40m"		# Cyan on black
+colors[$shrub]="\e[1;32;40m"	# Bright green on black
+colors[$crushed]="\e[32;40m"	# Green on black
+colors[$splat]="\e[1;37;41m"	# Bright white on red
+colors[$wall]="\e[30;41m"		# Black on red
+
+colors["intro"]="\e[1;33;40m"	# Bright yellow on black
+colors["outro"]="\e[1;37;41m"	# Bright white on red
+
+# Useful ANSI strings.
+clr_screen="\e[2J\e[H"
+clr_down="\e[J"
+clr_eol="\e[0K"
+clr_line="\e[2K"
+color_off="\e[0m"
+curs_off="\e[?25l"
+curs_on="\e[?25h"
+
+
+# Initial Setup ====================================================================================
+
+check_tty() {
+	# Check tty is at least minimum size. This game will run in a ridiculously small area. Has been
+	# tested on a phone running termux with 27x50 terminal.
+	read -r tty_rows tty_cols <<< $(stty size)
+	[[ $tty_rows -lt 20 || $tty_cols -lt 40 ]] && {
+		printf "What is this?\nA terminal for ants?\nMinimum size 20 x 40\nYours is $tty_rows x $tty_cols...\n"; exit 1; }
+
+	# Save terminal settings, turn off tty echo, and hide cursor.
+	stty_old=$(stty -g)
+	stty -echo
+	printf $curs_off
+
+	# Trap to make sure tty and cursor are reset properly regardless of how script exits.
+	trap "on_exit" EXIT
+}
+
+on_exit() {
+	if [[ $? -eq 0 ]]; then
+		# Normal exit. Clear screen if not debugging. All other exit codes will
+		# not clear the screen. This includes help and version output.
+		[[ -z $debug ]] && printf $clr_screen || printf "\n"
+	fi
+
+	# Restore terminal settings, show cursor.
+	stty $stty_old
+	printf $curs_on
+}
+
+
+# Command Line Functions ===========================================================================
+
+cmderr() {
+	printf '%s\n' "$1 error: invalid input or value out of range! Type $_name -h for help."
+	exit 1
+}
+
+cmdline() {
+	local opt arg
+
+	while [[ "$#" -gt 0 ]]; do
+		opt=${1:0:2}; arg=${1:2}
+		case $opt in
+			"-h")
+				[[ -z $arg ]] && { show_help "options"; exit 2; }
+				[[ $arg == "elp" ]] && { show_help; exit 2; }
+				cmderr $opt ;;
+
+			"-v")
+				printf "$_title v$_ver\n"; exit 2 ;;
+
+			# Boolean options. Ignore arg.
+			"-f")
+				fast_intro=true ;;
+			"-k")
+				set_keys=true ;;
+			"-n")
+				no_color=true ;;
+
+			"-d")
+				debug=true ;;
+
+			# Integer in range options.
+			"-r")
+				[[ ! $arg =~ ^[0-9]+$ || $arg -lt 5 || $arg -gt 15 ]] && cmderr $opt
+				start_robots=$arg ;;
+			"-a")
+				[[ ! $arg =~ ^[0-9]+$ || $arg -lt 1 || $arg -gt 5 ]] && cmderr $opt
+				add_robots=$arg ;;
+			"-t")
+				[[ ! $arg =~ ^[0-9]+$ || $arg -lt 1 || $arg -gt 10 ]] && cmderr $opt
+				teleports=$arg ;;
+
+			# Single character in set option.
+			"-s")
+				! [[ $arg == "e" || $arg == "h" ]] && cmderr $opt
+				skill=$arg ;;
+
+			# String input option.
+			"-u")
+				arg="${arg//[![:alnum:]]/}"
+				[[ -z $arg ]] && cmderr $opt
+				username=$arg ;;
+
+			"-z") # Don't use this or you might destroy reality.
+				start_robots=200; teleports=10 ;;
+
+			*)
+				cmderr $opt ;;
+		esac
+		shift
+	done
+}
+
+show_help() {
+	local key title="$1"
+
+	if [[ ! -z $title ]]; then
+		# Function was called with a section name. Extract and print section using some awk fuckery.
+		# The help contents are contained in comments at the bottom of this script.
+		awk -v section="#[$title]" '
+			BEGIN { in_section = 0 }
+			$0 ~ /^#\[.*\]$/ {
+				if ($0 == section) { in_section = 1; next }
+				else if (in_section) { in_section = 0 }
+			} in_section' "$0" | sed 's/#/ /'
+		return
+	fi
+
+	while true; do
+		# Function was called with no section name. Display help menu black on white and wait for an input.
+		# Recursively call show_help from here and the code above will display the text.
+		printf "\e[7m  $_title help system. View (o)ptions, (h)ow to play, (c)ontrols, (s)coring, or (q)uit?  \e[27m"
+		read -srN1 key
+		# Erase menu line.
+		printf $clr_line"\r"
+		case $key in
+			"h")
+				show_help "howto" ;;
+			"c")
+				show_help "controls" ;;
+			"s")
+				show_help "scoring" ;;
+			"o")
+				show_help "options" ;;
+			"q")
+				printf "\n"; break ;;
+			*) ;;
+		esac
+	done
+}
+
+
+# Game Functions ===================================================================================
+
+game_intro() {
+	# Display an intro splash screen.
+	local i row=$((arena_rows/2-6)) col=$((arena_cols/2+arena_cols%2-6))
+
+	declare -a text=(
+		' ___  ___  ___   ___ _____ '
+		'| _ \/ _ \| _ ) / _ \_   _|'
+		'|   / (_) | __ \ (_) || |  '
+		'|_|_\\___/|____/\___/ |_|  '
+		'!'
+		'  ___  ___   _ _____ _  _  '
+		' |   \| __| /_\_   _| || | '
+		' | |) | _| / _ \| | | __ | '
+		' |___/|___/_/ \_\_| |_||_| '
+		'!'
+		' __  __   _ _____ ___ _  _ '
+		'|  \/  | /_\_   _/ __| || |'
+		'| |\/| |/ _ \| || (__| __ |'
+		'|_|  |_/_/ \_\_| \___|_||_|'
+		'                           '
+		'!' '!' )
+
+	[[ -z $no_color ]] && printf "${colors[intro]}"
+	for i in "${!text[@]}"; do
+		if [[ "${text[$i]}" != '!' ]]; then
+			print_at $row $col
+			printf '%s' "${text[$i]}"
+			((row++))
+		elif [[ -z $fast_intro ]]; then
+			sleep .5
+		fi
+	done
+	[[ -z $no_color ]] && printf $color_off
+
+	print_at $row $col "---=== PRESS ANY KEY ===---"
+}
+
+game_over() {
+	# Display a game over message.
+	local mid_row=$((arena_rows/2)) mid_col=$((arena_cols/2+arena_cols%2-3))
+
+	[[ -z $no_color ]] && printf "${colors[outro]}"
+
+	print_at $((mid_row-1)) $((mid_col)) "                 "
+	print_at $((mid_row)) $((mid_col))   "    GAME OVER    "
+	print_at $((mid_row+1)) $((mid_col)) "                 "
+
+	[[ -z $fast_intro ]] && sleep 2 || sleep .5
+
+	[[ -z $no_color ]] && printf "${colors[intro]}"
+
+	print_at $((mid_row-1)) $((mid_col)) "                 "
+	print_at $((mid_row)) $((mid_col))   "   PLAY AGAIN?   "
+	print_at $((mid_row+1)) $((mid_col)) "                 "
+
+	[[ -z $no_color ]] && printf $color_off
+}
+
+init_game() {
+	# Set first run values if not set on command line.
+	[[ -z $start_robots ]] && start_robots=10
+	[[ -z $add_robots ]] && add_robots=3
+	[[ -z $teleports ]] && teleports=5
+	[[ -z $skill ]] && skill="n"
+	[[ -z $username ]] && username="${USER//[![:alnum:]]/}"
+
+	# Default keys.
+	declare -gA kc=(
+		["NORTH"]="[A" ["SOUTH"]="[B" ["WEST"]="[D" ["EAST"]="[C"
+		["NORTHWEST"]="[H" ["SOUTHWEST"]="[F" ["NORTHEAST"]="[5" ["SOUTHEAST"]="[6"
+		["WAIT"]=" " ["REPEAT"]="r" ["TELEPORT"]="t" ["EMP"]="e"
+	)
+
+	if [[ -n $set_keys ]]; then
+		local i k
+		# Reassign keys. Use indexed array for names to process keys in order.
+		declare -a kc_order=(North South West East Northwest Southwest Northeast Southeast Wait Repeat Teleport EMP)
+		printf "\nKeyboard setup:\n\n"
+
+		for i in "${kc_order[@]}"; do
+			printf '%b%b' $clr_line "Press new key for $i or Esc to keep default\r"
+			k=$(read_key raw)
+			[[ -n $k ]] && kc[${i^^}]=$k
+		done
+	fi
+
+	# Limit side panel cols to 5 and game arena cols to 99 in the following formulas.
+	[[ $tty_cols -gt 234 ]] && tty_cols=234
+
+	# Columns of data to the right of the arena. A list of active robots is shown here while
+	# playing and the high score table for the current skill level when not playing.
+	panel_cols=$((tty_cols/48+1))
+
+	# Scale arena to fit terminal. Limited to 99 cols as all coordinate calculations use fixed
+	# width strings that were originally 2 characters and I'm too lazy to change everything.
+	arena_rows=$((tty_rows-6))
+	arena_cols=$(((tty_cols-(panel_cols*6+6))/2))
+}
+
+init_level() {
+	# Create associative array to hold object locations. Array key is the y,x coordinates and
+	# array element is the object at that location. Array is cleared every level, the player is
+	# placed in the center, then make_robots and make_shrubs functions populate it.
+	declare -gA arena=()
+
+	if [[ -n $1 ]]; then
+		# Clear score and reset robot count if new game or replay.
+		score=0
+		robot_count=$start_robots
+	else
+		# Increment robot count each level.
+		((robot_count+=$add_robots))
+	fi
+
+	# Reset teleport count and EMP each level.
+	tele_count=$teleports
+	emp_ready=true
+	emp_timer=0
+
+	# Draw the arena walls.
+	make_arena $arena_rows $arena_cols
+
+	# Place player.
+	player_row=$((arena_rows/2))
+	player_col=$((arena_cols/2+arena_cols%2))
+	arena["$(_key $player_row $player_col)"]=$player
+	object show "$(_key $player_row $player_col)"
+
+	# Create robots. Don't display coordinate list if intro.
+	make_robots $robot_count $1
+
+	# Create random number of shrubs in a range based on skill level.
+	case $skill in
+		"e") make_shrubs $((10+RANDOM%15)) ;;
+		"n") make_shrubs $((5+RANDOM%10)) ;;
+		"h") make_shrubs $((2+RANDOM%5)) ;;
+		*) ;;
+	esac
+
+	if [[ $1 == "intro" ]]; then
+		# Move player out from behind message.
+		teleport
+
+		# Display intro message.
+		game_intro
+
+		# Display high score table.
+		scores
+
+		[[ $(read_key) == "q" ]] && exit 0
+	else
+		# Display starting status if not intro screen.
+		show_status "Dropped player at $player_row,$player_col..." "Begin deathmatch!"
+	fi
+}
+
+make_arena() {
+	local i
+
+	# Clear screen and set color if option is on.
+	printf $clr_screen
+	[[ -z $no_color ]] && printf "${colors[$wall]}"
+
+	# Wall blocks are 2 characters wide. Arena is $1 blocks high and $2 blocks wide.
+	printf '%.0s'$wall $(seq $(($2+2))) # top
+	printf "\e[$(($1+2));1H"
+	printf '%.0s'$wall $(seq $(($2+2))) # bottom
+
+	for i in $(seq 2 $(($1+1))); do
+	   	printf "\e[$i;1H"$wall # left
+	   	printf "\e[$i;$(((($2+2)*2)-1))H"$wall # right
+   	done
+
+	[[ -z $no_color ]] && printf $color_off
+}
+
+make_shrubs() {
+	local i key rnd_row rnd_col
+
+	# Create $1 shrubs. These are passive blocking objects than can stop a robot for a
+	# while. There is a chance each move for the robot to blow up or crush the shrub.
+	for i in $(seq 1 $1); do
+		while true; do
+			# Don't place shrubs close to walls. Have a small buffer zone.
+			rnd_row=$((3+RANDOM%(arena_rows-4)))
+			rnd_col=$((3+RANDOM%(arena_cols-4)))
+
+			key=$(_key $rnd_row $rnd_col)
+
+			# Check if location is empty.
+			[[ -z "${arena[$key]}" ]] && break
+		done
+
+		arena[$key]=$shrub
+		object show $key
+   	done
+}
+
+make_robots() {
+	local i key rnd_row rnd_col check_row check_col safe_zone
+
+	# Adjust safe zone size for skill level.
+	case $skill in
+		"e") safe_zone=2 ;;
+		"n") safe_zone=1 ;;
+		"h") safe_zone=0 ;;
+		*) ;;
+	esac
+
+	# Create $1 robots.
+	for i in $(seq 1 $1); do
+		while true; do
+			rnd_row=$((1+RANDOM%arena_rows))
+			rnd_col=$((1+RANDOM%arena_cols))
+
+			# Get absolute value of random location distance from player.
+			check_row=$(_abs $((rnd_row-player_row)) )
+			check_col=$(_abs $((rnd_col-player_col)) )
+
+			# Check if location is empty and not in the safe zone around player.
+			key=$(_key $rnd_row $rnd_col)
+			[[ -z "${arena[$key]}" ]] && [[ $check_row -gt $safe_zone || $check_col -gt $safe_zone ]] && break
+		done
+
+		arena[$key]=$robot
+		object show $key
+   	done
+
+	[[ -n $repeat_key ]] && sleep .2
+
+	# Display list of coordinates if not intro screen. Arg can be intro, start, or null.
+	[[ $2 != "intro" ]] && object list
+}
+
+move_robots() {
+	local i new robot_row robot_col
+
+	# Turn crushed shrubs back into robots. This needs to be done before main loop as some
+	# robots were getting a double move due to the non-linear way bash handles associative
+	# arrays. Easier than using a sorted index.
+	for i in "${!arena[@]}"; do
+		[[ "${arena[$i]}" == $crushed ]] && { arena[$i]=$robot; object show $i; }
+	done
+
+	for i in "${!arena[@]}"; do
+		# This is not a robot so nothing to do.
+		[[ "${arena[$i]}" != $robot ]] && continue
+
+		# Get current robot location from array key.
+		robot_row=$((10#${i:0:2}))
+		robot_col=$((10#${i:3:2}))
+
+		# Move robot towards the player.
+		((robot_row+= $(_comp $robot_row $player_row) ))
+		((robot_col+= $(_comp $robot_col $player_col) ))
+		new=$(_key $robot_row $robot_col)
+
+		# Check for collision.
+		case "${arena[$new]}" in
+			$robot | $crushed)
+				# Clear last location and draw junk in new location. Add score for 2 robots.
+				[[ -n $repeat_key ]] && ((score+=30)) || ((score+=20))
+				arena[$new]=$junk
+				object clear $i
+				object show $new ;;
+
+			$junk)
+				# Draw more junk at last location. Add score for 1 robot.
+				[[ -n $repeat_key ]] && ((score+=15)) || ((score+=10))
+				arena[$i]=$junk
+				object show $i ;;
+
+			$shrub)
+				case $((RANDOM%10)) in
+					1) # 10% chance robot falls into shrub and blows up, unless hard skill.
+						[[ $skill == "h" ]] && continue
+						[[ -n $repeat_key ]] && ((score+=15)) || ((score+=10))
+						arena[$new]=$junk
+						object clear $i
+						object show $new ;;
+					2) # 10% chance robot crushes shrub, unless easy skill.
+						[[ $skill == "e" ]] && continue
+						arena[$new]=$crushed
+						object clear $i
+						object show $new ;;
+					*) ;;
+				esac ;;
+
+			$player)
+				# Clear last location and draw splat in new location. No score penalty if
+				# player did not cause the collision.
+				arena[$new]=$splat
+				object clear $i
+				object show $new
+				status="ded$player";
+				# No need to finish loop when ded.
+				return ;;
+
+			*)
+				# Robot moved ok. Clear last location and draw robot in new location.
+				arena[$new]=$robot
+				object clear $i
+				object show $new
+		esac
+	done
+
+	# If all robots destroyed then add points for unused teleports and EMP and start next level.
+	if [[ $(( $(object count $robot)+$(object count $crushed) )) -eq 0 ]]; then
+		status="clear"
+		((score+=((tele_count*10))))
+		[[ -n $emp_ready ]] && ((score+=25))
+	fi
+
+	object list
+}
+
+move_player() {
+	local inp old new old_row old_col
+
+	if [[ $status == "repeat" && -z $repeat_key ]]; then
+		# Get key for repeat action. Set global variable so key is persistent each call.
+		inp=$(read_key)
+		repeat_key=$inp
+	elif [[ $status == "repeat" && -n $repeat_key ]]; then
+		# Repeat last movement. Status changes on collision here or in move_robots.
+		inp=$repeat_key
+	else
+		# Clear status and get key for normal action. Status will always be set below.
+		unset status repeat_key
+		inp=$(read_key)
+	fi
+
+	# Save last location.
+	old_row=$player_row
+	old_col=$player_col
+
+	# Process input.
+	case ${inp^^} in
+		"NORTH")
+			((player_row--)) ;;
+		"SOUTH")
+			((player_row++)) ;;
+		"WEST")
+			((player_col--)) ;;
+		"EAST")
+			((player_col++)) ;;
+		"NORTHWEST")
+			((player_col--)) && ((player_row--)) ;;
+		"NORTHEAST")
+			((player_col++)) && ((player_row--)) ;;
+		"SOUTHWEST")
+			((player_col--)) && ((player_row++)) ;;
+		"SOUTHEAST")
+			((player_col++)) && ((player_row++)) ;;
+
+		"WAIT")
+			# Waiting. Do not change status if performing a repeat action.
+			[[ -z $repeat_key ]] && status="wait"
+			return ;;
+
+		"REPEAT")
+			# Set status to get the repeat action key next call to function unless we press R again
+			# or any key that is not movement or wait.
+			[[ $status == "repeat" ]] && status="cancel" || status="repeat"
+			return ;;
+
+		"TELEPORT")
+			# Teleport function ensures no collision.
+			if [[ $tele_count -gt 0 ]]; then
+				teleport
+				status="tele"
+			else
+				status="notele"
+			fi
+			return ;;
+
+		"EMP")
+			# EMP pauses all robots for 3 moves.
+			if [[ -n $emp_ready ]]; then
+				((score-=(($(object count $robot)*5))))
+				unset emp_ready
+				emp_timer=3
+				status="emp"
+			else
+				status="noemp"
+			fi
+			return ;;
+
+		"Q")
+			# Coward key. Instant exit to shell.
+			status="quit"
+			return ;;
+
+		*)
+			# Invalid input.
+			status="oops"
+			return ;;
+	esac
+
+	# Check for wall collision.
+	if [[ player_row -lt 1 || player_row -gt arena_rows || player_col -lt 1 || player_col -gt arena_cols ]]; then
+		status="wall"
+		player_row=$old_row
+		player_col=$old_col
+
+		[[ -n $repeat_key ]] && ((score-=5)) || ((score-=25))
+		return
+	fi
+
+	# Check for other collisions.
+	old=$(_key $old_row $old_col)
+	new=$(_key $player_row $player_col)
+
+	case "${arena[$new]}" in
+		$robot | $junk)
+			# Player ran into a robot or junk pile.
+			[[ "${arena[$new]}" == $robot ]] && { [[ -n $repeat_key ]] && ((score-=100)) || ((score-=250)) }
+			[[ "${arena[$new]}" == $junk ]] && { [[ -n $repeat_key ]] && ((score-=500)) || ((score-=1000)) }
+
+			status="ded${arena[$new]}"
+			arena[$new]=$splat
+			object clear $old
+			object show $new ;;
+
+		$shrub)
+			# Can't move thru shrubs. Reset last location.
+			[[ -n $repeat_key ]] && ((score-=10)) || ((score-=50))
+			status="shrub"
+			player_row=$old_row
+			player_col=$old_col ;;
+
+		*)	# Player moved ok. Do not change status if performing a repeat action.
+			[[ -z $repeat_key ]] && status="safe"
+			arena[$new]=$player
+			object clear $old
+			object show $new ;;
+	esac
+}
+
+object() {
+ 	if [[ $1 == "count" ]]; then
+		# Return count of type $2 objects.
+		local i count=0
+
+		for i in "${!arena[@]}"; do
+			[[ "${arena[$i]}" == $2 ]] && ((count++))
+		done
+		printf $count
+
+	elif [[ $1 == "clear" ]]; then
+		# Clear object from screen and array.
+		local row=${2:0:2} col=${2:3:2}
+
+		print_at $row $col "  "
+		unset arena[$2]
+
+	elif [[ $1 == "show" ]]; then
+		# Display object on screen at array key location.
+		local row=${2:0:2} col=${2:3:2}
+		local obj="${arena[$2]}"
+
+		[[ -z $no_color ]] && printf "${colors[$obj]}"
+		print_at $row $col $obj
+	   	[[ -z $no_color ]] && printf $color_off
+
+	elif [[ $1 == "list" ]]; then
+		# Clear the side panel.
+		local i row=1 col=0
+
+		for ((i=1; i<=$arena_rows; i++)); do
+			print_at $i $((arena_cols+2))
+			printf $clr_eol
+		done
+
+		# If dummy argument exists just clear and return.
+		[[ -n "$2" ]] && return
+
+		# Display a list of active robots to the right of the arena in $panel_cols columns.
+		# Wrap back to the start if we run out of space. This display is mostly for effect.
+		# Sometimes useful to find the last few robots in the carnage.
+		for i in "${!arena[@]}"; do
+			if [[ "${arena[$i]}" == $robot ]]; then
+				print_at $row $((arena_cols+(col*3+3))) "$i"
+				[[ $row -lt $arena_rows ]] && ((row++)) || { row=1; ((col++)); }
+				[[ $col -eq $panel_cols ]] && col=0
+			fi
+		done
+	fi
+}
+
+print_at() {
+	# Convert strings to base 10 ints or bash interprets leading 0 as octal number and breaks shit.
+	local row=$((10#$1)) col=$((10#$2))
+
+	# Place cursor at arena y, x position. Note: x is doubled to account for the 2 character wide
+	# game pieces. Adjust values as needed if this is used to print stuff outside the arena.
+	printf "\e[$((row+1));$((col*2+1))H"
+
+	# Display optional text as literal string so special chars don't mess with printf formatting.
+	printf '%b' "$3"
+}
+
+read_key() {
+	local ki key
+
+	# Clear keyboard buffer so we only read a key when ready.
+	read -d '' -s -t 0.01
+
+	if [[ $1 == "in" ]]; then
+		# Wait for a key in $2 set. This function does not need the extended key code processing.
+		while true; do
+			read -sN1 key
+			[[ $2 == *$key* ]] && break
+		done
+	else
+		# Wait for key press.
+		read -sN1 key
+
+		# If first read is Esc then attempt to get [+ID and discard optional 4th char. Esc key will
+		# give a null output which is used in reassignment section to keep default.
+		[[ $key == $'\x1b' ]] && read -sN2 -t 0.01 key && read -sN1 -t 0.01
+
+		# If key was not Esc and not returning raw value then convert to human friendly value if
+		# key exists in keycode array.
+		if [[ ${#key} -gt 0 ]] && [[ $1 != "raw" ]]; then
+			for ki in "${!kc[@]}"; do
+				[[ "${kc[$ki]}" == "$key" ]] && key="$ki"
+			done
+		fi
+	fi
+
+	printf "$key"
+}
+
+scores() {
+	local i=0 section score name
+
+	# Create associative array to hold high score table for current skill level, and normal
+	# arrays for sorting and holding the other skill level entries.
+	declare -A score_tab=()
+	declare -a list=() sorted=()
+
+	# Read scores file into arrays, ignoring file does not exist error. It is created every
+	# time the scores are saved.
+	while IFS=',' read -r section score name; do
+		if [[ $section == $skill ]]; then
+			score_tab[$score]=$name
+		else
+			list[$i]="$section,$score,$name"; ((i++))
+		fi
+	done 2>/dev/null < "$score_file"
+
+	# Add the new score as key and name as element to the associative array.
+	[[ -n $1 ]] && score_tab["$1"]="$2"
+
+	# Sort scores in descending order. Remove smallest value if more than 5.
+	sorted=($(for i in "${!score_tab[@]}"; do printf '%s\n' "$i"; done | sort -nr))
+	[[ "${#sorted[@]}" -gt 5 ]] && unset sorted[-1]
+
+	# Clear or create file.
+	> "$score_file"
+	# Write the current table and holding array to the file.
+	for i in "${!sorted[@]}"; do
+		printf '%s\n' "$skill,${sorted[$i]},${score_tab[${sorted[$i]}]}" >> "$score_file"
+	done
+	for i in "${!list[@]}"; do
+		printf '%s\n' "${list[$i]}" >> "$score_file"
+	done
+
+	# Clear the side panel and display the table.
+	object list clear
+	for i in "${!sorted[@]}"; do
+		score="${sorted[$i]}"
+		name="${score_tab[$score]}"
+		case $panel_cols in
+			[3-5])
+				# If 3 or more columns use 1 line.
+				local fmt=" %5d %-.$((panel_cols*4))s"
+
+				print_at $((i*2+1)) $((arena_cols+2)); printf "${fmt}" "$score" "$name" ;;
+			[1-2])
+				# If 1 or 2 columns use 2 lines. Include leading space for 2 columns.
+				[[ $panel_cols -eq 2 ]] && local sp=" "
+
+				# Truncate username to fit if required.
+				local fmt="%-.$((panel_cols*4+4))s"
+
+				print_at $((i*3+1)) $((arena_cols+2)); printf "${sp}%-5d" "$score"
+				print_at $((i*3+2)) $((arena_cols+2)); printf "${sp}${fmt}" "$name" ;;
+			*) ;;
+		esac
+	done
+}
+
+show_status() {
+	# Display status lines under the arena.
+
+	# Info for debug.
+	[[ -n $debug ]] && printf "\e[1;1Ha_rows=$arena_rows a_cols=$arena_cols t_rows=$tty_rows t_cols=$tty_cols p_cols=$panel_cols  "
+
+	# Line 1 is global game stats.
+	print_at $((arena_rows+3)) 0 "$clr_line  Score:$score | Robots:$(object count $robot) | Teleports:$tele_count"
+
+	# Show additional info if tty is wide enough.
+	[[ $tty_cols -ge 52 ]] && printf " | Junk:$(object count $junk)"
+	[[ $tty_cols -ge 62 ]] && printf " | Shrubs:$(object count $shrub)"
+
+	# Line 2 is supplied player info with optional extra.
+	print_at $((arena_rows+4)) 0 "$clr_down  $1"
+	# Print optional text on 3rd line if tty is not wide enough.
+	[[ -n $2 ]] && { [[ $tty_cols -ge 48 ]] && printf " | $2" || printf "\n  $2"; }
+}
+
+teleport() {
+	local old=$(_key $player_row $player_col) new
+	local rnd_row rnd_col check_row check_col
+
+	# Set minimun teleport distance to 1/3 of the arena, because landing near where you
+	# started sucks.
+	local min_row_jump=$((arena_rows/3)) min_col_jump=$((arena_cols/3))
+
+	while true; do
+		# Teleport to random location. Don't land right next to wall.
+		rnd_row=$((2+RANDOM%(arena_rows-2)))
+		rnd_col=$((2+RANDOM%(arena_cols-2)))
+
+		# Get absolute value of random location distance from player.
+		check_row=$(_abs $((rnd_row-player_row)) )
+		check_col=$(_abs $((rnd_col-player_col)) )
+
+		# Check if new location is empty and a minimum distance from current location.
+		new=$(_key $rnd_row $rnd_col)
+		[[ -z "${arena[$new]}" ]] && [[ $check_row -ge $min_row_jump && $check_col -ge $min_col_jump ]] && break
+	done
+
+	player_row=$rnd_row
+	player_col=$rnd_col
+	arena[$new]=$player
+	object clear $old
+	object show $new
+
+	((score-=((tele_count*10))))
+	((tele_count--))
+}
+
+_abs() {
+	# If arg is a number return absolute value.
+	[[ $1 =~ ^-?[0-9]+$ ]] && printf "${1#-}" || printf "NaN"
+}
+
+_comp() {
+	# Args are player and robot location. Return -1, 0, or 1 for movement direction section.
+	printf '%d' "$(( ${1} > ${2} ? -1 : (${1} < ${2} ? 1 : 0) ))"
+}
+
+_key() {
+	# Generate associative array key from coordinates. Return a string formatted yy,xx with leading
+	# zero. This simulates a 2 dimensional array while not actually being one.
+	printf '%02d,%02d' $1 $2
+}
+
+
+# Main =============================================================================================
+
+# Make sure game will fit screen, create exit trap.
+check_tty
+
+# Process command line.
+cmdline $@
+
+# Do keyboard setup, set default values not defined on command line, scale game to tty.
+init_game
+
+# Display demo arena with no status or object list on first run.
+init_level intro
+
+init_level start
+
+while true; do
+
+	move_player
+
+	if [[ $status == "safe" || $status == "wait" ]] || [[ $status == "repeat" && -n $repeat_key ]]; then
+		# Only move robots if player moved or is waiting, and EMP is not active.
+		[[ emp_timer -gt 0 ]] && ((emp_timer--)) || move_robots
+	fi
+
+	case $status in
+		"oops")
+			show_status "Try again..." ;;
+
+		"safe")
+			show_status "Moved safely to $player_row,$player_col..." ;;
+
+		"wait")
+			show_status "Waiting at $player_row,$player_col..." ;;
+
+		"repeat")
+			show_status "Repeat action from $player_row,$player_col..." ;;
+
+		"cancel")
+			show_status "Canceled repeat action!" ;;
+
+		"tele")
+			show_status "Teleported to $player_row,$player_col..." ;;
+
+		"notele")
+			show_status "Teleporter is offline!" ;;
+
+		"emp")
+			show_status "EMP activated!" "Robots reset in 3 moves..." ;;
+
+		"noemp")
+			show_status "EMP discharged!" ;;
+
+		"shrub")
+			show_status "A tough shrub blocks the way!" ;;
+
+		"wall")
+			show_status "A tall wall blocks the way!" ;;
+
+		"clear")
+			show_status "All robots destroyed!" "Spawning next wave..."
+			sleep 1; init_level ;;
+
+		"ded"*)
+			[[ ${status:3:2} == $player ]] && show_status "Crushed by a robot at $player_row,$player_col!" "Oops..."
+			[[ ${status:3:2} == $robot ]] && show_status "Ran into a robot at $player_row,$player_col!" "Loser..."
+			[[ ${status:3:2} == $junk ]] && show_status "Tripped over a junk pile at $player_row,$player_col!" "Sigh..."
+
+			# Display game over message.
+			game_over
+
+			# Update and display high score table.
+			scores "$score" "$username"
+
+			[[ $(read_key in "yn") == "y" ]] && init_level start || break ;;
+
+		"quit")
+			break ;; # Coward! Die like a human. No score for you.
+
+		*)
+			printf "\nWe got bugs, boss! Status not found.\n"
+			exit 1 ;; # If this happens we have bugs.
+	esac
+done
+
+exit 0
+
+# Help text ========================================================================================
+#
+# This is read by the awk command up top and displayed by section name with the leading # removed.
+#
+#[options]
+#
+#Command Line Options
+#
+#    -h[elp]  Show this page or extended help pages.
+#
+#    -f       Fast splash screen. Saves you 3 seconds of waiting.
+#
+#    -k       Reassign keys. Use this if your terminal uses non-standard number pad key
+#             codes or you just want to use different keys.
+#
+#    -n       No color graphics. Some folks like things in B&W, or maybe your terminal
+#             doesn't support color.
+#
+#    -v       Show game version.
+#
+#
+#    Gameplay tweaks:
+#
+#    -r<num>  Start with <num> robots (5-15, default 10)
+#
+#    -a<num>  Add <num> robots each level (1-5, default 3)
+#
+#    -t<num>  Teleporter has <num> uses (1-10, default 5)
+#
+#    -s<e|h>  Skill level easier or harder. See extended help for details.
+#
+#    -u<name> Name for high score table. Default is your account username.
+#
+#[howto]
+#
+#How to Play
+#
+#    You have been dropped at the center of a strange walled arena. In this arena you
+#    see a number of deadly giant robots waiting. These robots have one mission - Kill
+#    All Humans. As you are the only human around this is not good for your health.
+#
+#    The robots are so intent on completing their mission that they will run into each
+#    other and blow up as they charge to crush you. Without any type of weapon this is
+#    the only way you can survive, forcing the robots to destroy themselves.
+#
+#    When two robots collide they create a pile of radioactive junk, and when another
+#    robot runs into a junk pile it self destructs, making the pile even bigger. Junk
+#    is deadly to humans, so avoid tripping over it.
+#
+#    You will find several tough shrubs growing in the arena. The robots can see over
+#    shrubs, but have trouble getting through them. Each time you move there is a chance
+#    that a robot blocked by a shrub will get stuck and blow up, or crush the shrub and
+#    keep going. Shrubs can be used as shields while planning your next move. Be careful
+#    as running into a shrub will injure you and cost points.
+#
+#    While you have no weapons, you do have some defensive tools at your disposal. Your
+#    pockets contain a teleporter with a set number of uses, and a powerful EMP device
+#    with a single charge. The teleporter moves you to a safe random location across the
+#    arena. The device will never drop you on a robot, but you can land next to one. The
+#    EMP disables all remaining robots for 3 moves. Both devices reset each level.
+#
+#    When all robots have been destroyed you will advance to the next level, where an
+#    even larger number of robots await. Continue advancing until overwhelmed. There is
+#    no end to the horror. Getting a high score is the only thing that matters.
+#
+#    Selectable skill level (see -s option) changes the size of your safe zone, or how
+#    close to your player the robots can spawn at the start of a level, the number of
+#    shrubs, and how robots interact with shrubs. Easier prevents robots crushing shrubs
+#    and harder prevents shrubs destroying robots.
+#
+#[controls]
+#
+#Game Controls
+#
+#    Keypad  Move your player one step in any direction. The robots all move one step
+#            towards you after you move. Watch where you go. Walking into walls or shrubs
+#            costs you points.
+#
+#    Space   Wait while the robots move one step towards you. Waiting can be your best
+#            defence. Watch and learn how the robots move and crash into each other.
+#
+#    R       Repeat next movement or wait until you run into something, get crushed by a
+#            robot, or complete the level. Any key other than move or wait will cancel.
+#
+#    T       Use the teleporter. Teleporting costs points, but you get bonus points
+#            awarded for unused teleports at the end of the level.
+#
+#    E       Activate your EMP device. Same as with teleporting, the EMP costs points to
+#            use, with bonus points awarded at the end of the level if unused.
+#
+#    The keys above can be redefined if you prefer (see -k option).
+#
+#    Q       Quit like a coward. At least go out in a blaze of glory. No score recorded.
+#
+#[scoring]
+#
+#Scoring
+#
+#    Destroying robots:
+#
+#               Normal Action   Repeat Action
+#
+#                 +10 points      +15 points
+#
+#    Running into things:
+#
+#        Wall     -25 points       -5 points
+#        Shrub    -50 points      -10 points
+#        Robot   -250 points     -100 points
+#        Junk   -1000 points     -500 points
+#
+#    Using tools:
+#
+#        EMP -5 points x robots stunned
+#        Teleport -10 points x remaining teleports
+#
+#    Level complete bonus:
+#
+#        +10 points x remaining teleports
+#        +25 points for an unused EMP
+#
+#
+#    Highest 5 scores for each skill level are saved.
+#
+#[end]

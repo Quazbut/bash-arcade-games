@@ -1,0 +1,1030 @@
+#!/bin/bash
+#
+# Blaster! Vertical scrolling space shooter game. Requires Bash v4.2 or newer.
+#
+# MIT License
+#
+# Copyright (c)2025 Quazbut (Jon Hay)
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
+
+# Constants ========================================================================================
+
+_name=$(basename "$0")
+_path=$(dirname "$0")
+
+_title="Blaster"
+_ver="1.25"
+
+# Sides of play area.
+edge="|"
+
+# Arrays of game objects and their colors.
+declare -A object=(
+	[player]="^A^"
+	[laser1]="!"
+	[laser2]=":"
+	[boom]="#@#"
+	[debris1]="#*#"
+	[debris2]=":.:"
+	[alien1]="<*>"
+	[alien2]="U^U"
+	[alien3]="]=["
+	[alien4]="vVv"
+	[lander1]="-*-"
+	[lander2]="=^="
+	[lander3]="[-]"
+	[lander4]=".v."
+)
+
+declare -A object_color=(
+	[player]="\e[33;40m"        # Yellow on black
+	[laser1]="\e[1;31;40m"      # Bright red on black
+	[laser2]="\e[31;40m"        # Red on black
+	[boom]="\e[1;37;41m"        # Bright white on red
+	[debris1]="\e[37;41m"       # White on red
+	[debris2]="\e[1;31;40m"     # Bright red on black
+	[alien1]="\e[1;34;40m"      # Bright blue on black
+	[alien2]="\e[1;35;40m"      # Bright magenta on black
+	[alien3]="\e[1;32;40m"      # Bright green on black
+	[alien4]="\e[1;33;40m"      # Bright yellow on black
+	[lander1]="\e[34;40m"       # Blue on black
+	[lander2]="\e[35;40m"       # Magenta on black
+	[lander3]="\e[32;40m"       # Green on black
+	[lander4]="\e[33;40m"       # Yellow on black
+)
+
+# Points value array. These are also used for ID when changing to lander and adjusting shield bar.
+declare -a points=(0 10 30 100 500)
+
+# Named colors for text color function.
+declare -A text_colors=(["bla"]="0" ["red"]="1" ["gre"]="2" ["yel"]="3" ["blu"]="4" ["mag"]="5" ["cya"]="6" ["whi"]="7")
+
+# Useful ANSI strings.
+clr_screen="\e[2J\e[H"
+clr_line="\e[2K"
+curs_off="\e[?25l"
+curs_on="\e[?25h"
+
+
+# Initial Setup ====================================================================================
+
+check_tty() {
+	# Check tty is at least minimum size.
+	read -r tty_rows tty_cols <<< $(stty size)
+	if [[ $tty_rows -lt 48 || $tty_cols -lt 64 ]]; then
+		printf "Minimum terminal size 48 x 64, yours is $tty_rows x $tty_cols...\n"
+		exit 1
+	fi
+
+	# Save terminal settings, turn off tty echo, and hide cursor.
+	stty_old=$(stty -g)
+	stty -echo
+	printf $curs_off
+
+	# Trap to make sure tty and cursor are reset properly regardless of how script exits.
+	trap "on_exit" EXIT
+}
+
+on_exit() {
+	if [[ $? -eq 0 ]]; then
+		# Normal exit. Clear screen if not debugging. All other exit codes will
+		# not clear the screen. This includes help and version output.
+		[[ -z $debug ]] && printf $clr_screen || printf "\n"
+	fi
+
+	# Restore terminal settings, show cursor.
+	stty $stty_old
+	printf $curs_on
+}
+
+
+# Command Line Functions ===========================================================================
+
+cmderr() {
+	printf '%s\n' "$1 error: invalid input or value out of range! Type $_name -h for help."
+	exit 1
+}
+
+cmdline() {
+	local opt arg
+
+	while [[ "$#" -gt 0 ]]; do
+		opt=${1:0:2}; arg=${1:2}
+		case $opt in
+			"-h")
+				! [[ -z $arg || $arg == "elp" ]] && cmderr $opt
+				[[ -z $arg ]] && show_help "options" || show_help
+				exit 2 ;;
+
+			"-v")
+				printf "$_title v$_ver\n"; exit 2 ;;
+
+			# Boolean options.
+			"-k")
+				set_keys=true ;;
+			"-n")
+				no_color=true ;;
+			"-d")
+				debug=true ;;
+
+			# Value in set or range options.
+			"-g")
+				[[ ! $arg =~ ^[0-9]+$ || $arg -lt 1 || $arg -gt 3 ]] && cmderr $opt
+				speed=$arg ;;
+			"-s")
+				! [[ $arg == "e" || $arg == "h" ]] && cmderr $opt
+				skill=$arg ;;
+
+			# String input option.
+			"-u")
+				arg="${arg//[![:alnum:]]/}"
+				[[ -z $arg ]] && cmderr $opt
+				username=$arg ;;
+
+			*)
+				cmderr $opt ;;
+		esac
+		shift
+	done
+}
+
+show_help() {
+	local key title="$1"
+
+	if [[ -n $title ]]; then
+		# Function was called with a section name. Extract and print section using some awk fuckery.
+		# The help contents are contained in comments at the bottom of this script.
+		awk -v section="#[$title]" '
+			BEGIN { in_section = 0 }
+			$0 ~ /^#\[.*\]$/ {
+				if ($0 == section) { in_section = 1; next }
+				else if (in_section) { in_section = 0 }
+			} in_section' "$0" | sed 's/#/ /'
+		return
+	fi
+
+	while true; do
+		# Function was called with no section name. Display help menu black on white and wait for an input.
+		# Recursively call show_help from here and the code above will display the text.
+		printf "\e[7m  $_title help system. View (o)ptions, (h)ow to play, (c)ontrols, (s)kill levels, or (q)uit?  \e[27m"
+		read -sN1 key
+		printf $clr_line"\r"
+		case $key in
+			"o")
+				show_help "options" ;;
+			"h")
+				show_help "howto" ;;
+			"c")
+				show_help "controls" ;;
+			"s")
+				show_help "skill" ;;
+			"q")
+				printf "\n"; break ;;
+			*) ;;
+		esac
+	done
+}
+
+
+# Game Functions ===================================================================================
+
+at() {
+	# Place cursor at row, col.
+	local row=$((10#$1))
+	local col=$((10#$2))
+	printf "\e[${row};${col}H"
+	[[ -z $3 ]] && return
+
+	# Print optional text, with formatting if supplied.
+	[[ -z $4 ]] && printf "$3" || printf "$3" "$4"
+}
+
+big_boom() {
+	# Big animated boom on player collision. Aliens boom fast, player slower.
+	local boom_rate=$(awk -v num="$((speed+1))" 'BEGIN { print num / 20 }')
+
+	at $base $1; get_fgo boom
+	[[ -z $2 ]] && sleep $boom_rate
+
+	at $base $1; get_fgo debris1
+	[[ -z $2 ]] && sleep $boom_rate
+
+	at $base $1; get_fgo debris2
+	[[ -z $2 ]] && sleep $boom_rate
+
+	at $base $1 "   "
+}
+
+color() {
+	# Ignore color command if no_color option is set.
+	[[ -n $no_color ]] && return
+
+	# Clear the text color.
+	[[ $1 == "off" ]] && { printf "\e[0m"; return; }
+
+	local fg_i bg_i
+
+	# Intensity is a 2 bit flag, 1 for bright, 0 for normal.
+	[[ ${1:0:1} -eq 1 ]] && fg_i="9" || fg_i="3"
+	[[ ${1:1:1} -eq 1 ]] && bg_i="10" || bg_i="4"
+
+	# Get named colors using only first 3 characters.
+	local fg_color=${2:0:3}
+	local bg_color=${3:0:3}
+
+	# Set foreground and background colors. Use default color if name is not in array.
+	printf "\e[$fg_i${text_colors[$fg_color]:-'9'};$bg_i${text_colors[$bg_color]:-'9'}m"
+}
+
+do_life_bar() {
+	# Show or hide remaining lives.
+	local i len str
+
+	# Adjust how many are displayed for intro/outro screens.
+	case $1 in
+		"all")
+			str=$(get_fgo player)
+			len=$start_lives ;;
+
+		"off")
+			str="    "
+			len=$lives ;;
+
+		*)
+			# Display one less up top because we count the life in play.
+			str=$(get_fgo player)
+			len=$((lives-1)) ;;
+	esac
+
+	# Display string centered on line 2.
+	at 2 $((mid-(4*len/2-1)))
+	for i in $(seq $len); do printf "$str "; done
+}
+
+do_shield_bar() {
+	# Show shield bar centered on last line. Never need to hide this as scrolling removes it.
+	at $((base+5)) $((mid-(shield_max/2-1)))
+	color 00 yel yel
+	printf '%*s' $shield | tr ' ' '|'
+	color 00 red red
+	printf '%*s' $((shield_max-shield)) | tr ' ' '-'
+	color off
+}
+
+do_score_bar() {
+	# Show or hide score centered on first line.
+	at 1 $((mid-3))
+	[[ -z $1 ]] && printf '%07d' "$score" || printf '%*s' 7
+}
+
+do_wipe() {
+	# Clear the play area with a full screen of scrolling background.
+	local i
+	# Wait for keyboard buffer to clear.
+	key_clear
+	# Hide score and lives because it looks nicer.
+	do_score_bar off
+	do_life_bar off
+
+	for i in $(seq 1 $tty_rows); do
+		get_bgo
+		sleep 0.01
+	done
+}
+
+game_info() {
+	# Display various game infos on intro screen.
+
+	local i
+	# Clear old info.
+	at 10 $((mid-7)) '%*s' 16
+	for i in $(seq 0 9); do
+		at $((12+2*i)) $((mid-12))
+		printf '%*s' 25
+	done
+
+	if [[ $1 == "points" ]]; then
+		local m=$((mid-12))
+
+		color 10 cyan black
+		at 10 $((mid-7)) "    SCORING    "
+
+		color 00 cyan black
+		at 12 $m; printf '%14s%11s' "Points" "Shield"
+		at 14 $m; printf '%3s%11d%11s' "${object[alien1]}" "${points[1]}" " "
+		at 16 $m; printf '%3s%11d%+11d' "${object[alien2]}" "${points[2]}" "$((points[2]/20))"
+		at 18 $m; printf '%3s%11d%+11d' "${object[alien3]}" "${points[3]}" "$((points[3]/20))"
+		at 20 $m; printf '%3s%11d%+11d' "${object[alien4]}" "${points[4]}" "$((points[4]/20))"
+		at 24 $m; printf '%3s%+22d' "${object[lander1]}" "$((points[1]/45+1))"
+		at 26 $m; printf '%3s%+22d' "${object[lander2]}" "$((points[2]/45+1))"
+		at 28 $m; printf '%3s%+22d' "${object[lander3]}" "$((points[3]/45+1))"
+		at 30 $m; printf '%3s%+22d' "${object[lander4]}" "$((points[4]/45+1))"
+
+		color off
+
+	elif [[ $1 == "credits" ]]; then
+		local m=$((mid-8))
+
+		color 00 cyan black
+		at 16 $m "Crafted With Love"
+		at 18 $m "For All The Crazy"
+		at 20 $m "Gamers Out There!"
+		at 26 $m "  Quazbut  2025  "
+
+		color off
+	fi
+}
+
+game_intro() {
+	# Clear screen. Display title, last score, lives for this skill level, press a key message.
+	do_wipe
+	do_score_bar
+	do_life_bar all
+
+	color 10 white red
+	at 7 $((mid-5)) "  BLASTER  "
+
+	color off
+	at 34 $((mid-6)) "Press any key!"
+
+	# Rotating info display.
+	local i=0 p key
+	while [[ -z $key ]]; do
+		case $i in
+			0) score_tab; i=1; p=4 ;;
+			1) game_info "points"; i=2; p=5 ;;
+			2) game_info "credits"; i=0; p=3 ;;
+			*) ;;
+		esac
+
+		# Wait for a key press or $p seconds. Esc or Enter keys will return zero length causing
+		# loop to repeat.
+		key=$(key_read $p)
+	done
+	[[ $key == "q" ]] && exit 0
+}
+
+game_over() {
+	# Clear screen and display game over message.
+	do_wipe
+	color 10 white red
+	at $((tty_rows/2)) $((mid-7)) "   GAME OVER   "
+	color off
+
+	# Update high score table with current username and score, but do not display.
+	score_tab $score $username
+
+	# Display message for 2 seconds or until player presses a key.
+	[[ $(key_read 2) == "q" ]] && exit 0
+}
+
+get_bgo() {
+	# Scroll with Esc-M ANSI code which moves cursor up one line, scrolling if at top of screen,
+	# and draw play area edges on inserted line.
+	at 1 $left "\eM$edge$blank_str$edge"
+
+	# Generate random background object. Objects start on line 3 or score/lives update clears it.
+	local col=$((2+RANDOM%(width-2)+left))
+	at 3 $col
+
+	case $((RANDOM%50)) in
+		0)
+			printf "o" ;;
+		[1-2])
+			printf "*" ;;
+		1[0-4])
+			printf "'" ;;
+		2[0-9])
+			printf "." ;;
+		*) ;;
+	esac
+}
+
+get_fgo() {
+	# Display foreground object from array.
+	if [[ -n $no_color ]]; then
+		printf '%s' "${object[$1]}"
+	else
+		printf '%b' "${object_color[$1]}${object[$1]}\e[0m"
+	fi
+}
+
+init_game() {
+	# Set initial values if not set on command line.
+	[[ -z $skill ]] && skill="n"
+	[[ -z $speed ]] && speed=2
+	[[ -z $username ]] && username="${USER//[![:alnum:]]/}"
+	# Truncate username to 16 characters.
+	username=$(printf '%.16s' "$username")
+
+	# Settings for the skill levels.
+	case $skill in
+		"e") # Easier
+			start_lives=4
+			shield_max=45
+			spawn_start=4
+			spawn_max=40
+			declare -ga free=(50000 40000 30000 20000 10000) ;;
+
+		"n") # Normal
+			start_lives=4
+			shield_max=45
+			spawn_start=5
+			spawn_max=50
+			declare -ga free=(40000 25000 10000) ;;
+
+		"h") # Harder
+			start_lives=3
+			shield_max=40
+			spawn_start=6
+			spawn_max=60
+			declare -ga free=(30000 15000) ;;
+
+		*)    ;;
+	esac
+
+	# Default keys are left, right, up, space.
+	declare -gA kc=(["[D"]="left" ["[C"]="right" ["[A"]="rapid" [" "]="shoot")
+
+	if [[ -n $set_keys ]]; then
+		# Assign additional keys. Defaults still work.
+		printf "\n$_title Keyboard Setup\n\n"
+		printf $clr_line"Press key to move left\r"; kc[$(key_wait)]="left"
+		printf $clr_line"Press key to move right\r"; kc[$(key_wait)]="right"
+		printf $clr_line"Press key for precision fire\r"; kc[$(key_wait)]="shoot"
+		printf $clr_line"Press key for rapid fire\r"; kc[$(key_wait)]="rapid"
+	fi
+
+	# Convert integer speed value to floating point fraction. This is the timeout used in
+	# the key_read function to set the game frame rate.
+	frame_rate=$(awk -v num="$((speed+1))" 'BEGIN { print num / 100 }')
+
+	# Scale game a bit to fit tty. Play area is min 60 and max 80 cols wide.
+	mid=$((tty_cols/2))
+	if [[ $tty_cols -lt 84 ]]; then
+		left=2
+		right=$((tty_cols-1))
+	else
+		left=$((mid-40))
+		right=$((mid+41))
+	fi
+
+	# Interior width of the play area.
+	width=$((right-left-1))
+
+	# Base is where our ship moves, pmin and pmax are just a nice reference to use the center of
+	# our 3 char wide ship as the alignment point.
+	base=$((tty_rows-5))
+	pmin=2; pmax=$((width-1))
+
+	# String of blanks used to clear a line between play area edges.
+	blank_str=$(printf '%*s' $width)
+}
+
+init_level() {
+	# Create arrays for the aliens. All array keys are the screen column the alien occupies. Main array
+	# element is the screen row. Data array element is the point value of that alien and is also used
+	# as ID when updating the lander graphics and shield bar if it lands. Hit array is a flag used for
+	# debris display after a laser hit.
+	declare -gA aliens=() data=() hit=()
+
+	# Clear score and set lives on first run or replay.
+	[[ -n $1 ]] && { score=0; lives=$start_lives; }
+
+	# Place player stopped in center to start.
+	pos=$((width/2))
+	dir=0
+
+	# Set true when player collides with alien or shield bar runs out.
+	ded=false
+
+	# Shield bar reduces as enemies pass player and land.
+	shield=$shield_max
+
+	# Percent chance of an alien spawning each time the screen scrolls. Value increases slowly
+	# at the start but speeds up as the level progresses until a preset limit is reached.
+	spawn_chance=$spawn_start
+
+	# Distribution counters used in addition to a random number generator to prevent spawns of the
+	# same type of alien too close to each other. These are set in frame 1 when an alien spawns and
+	# count down in frame 3 after surviving aliens advance.
+	rt_dist=0 # Rare type 1 in 20 lines
+	mt_dist=0 # Medium type 1 in 10 lines
+	ct_dist=0 # Common type 1 in 5 lines
+
+	# Graphics update frame counter cycles 0..3 continually.
+	update_frame=0
+
+	# Shot frame counter starts at 6 when laser fired and counts down to 0.
+	shot_frame=0
+
+	# Clear the screen with animation.
+	do_wipe
+}
+
+key_clear() {
+	# Player might be holding a key. Wait until released and keyboard buffer is empty.
+	while true; do
+		read -rs -d '' -N 1 -t 0.2
+		# Exit code >128 for read means timed out with no input.
+		[[ $? -gt 128 ]] && break
+	done
+}
+
+key_read() {
+	local key
+
+	# Get input if key is waiting else timeout.
+	read -rs -N 1 -t $1 key
+	[[ -z $key ]] && return
+
+	# If key is Esc then attempt to read [+ID and discard optional 4th char some keys return.
+	[[ $key == $'\x1b' ]] && read -rs -N 2 -t 0.001 key && read -rs -N 1 -t 0.001
+	[[ -z $key ]] && return
+
+	# Convert game control keys to a nicer to read format, return other keys as is.
+	printf "${kc[$key]:-$key}"
+}
+
+key_wait() {
+	local key
+
+	if [[ -n $1 ]]; then
+		# Wait for a key in $1 set.
+		while true; do
+			read -rs -N 1 key
+			[[ $1 == *$key* ]] && break
+		done
+	else
+		# Wait for any key.
+		while true; do
+			read -rs -N 1 key
+			[[ $key == $'\x1b' ]] && read -rs -N 2 -t 0.001 key && read -rs -N 1 -t 0.001
+			# Ignore any non-printable keys.
+			[[ -n ${key//[![:print:]]/} ]] && break
+		done
+	fi
+	printf "$key"
+}
+
+score_tab() {
+	local i hi name
+	local score_file="$_path/scores.bla"
+
+	# Create associative array to hold high score table with score as key and name as element.
+	declare -A scores=()
+	# Create normal array for sorting.
+	declare -a sorted=()
+
+	# Read the score file into an associative array, ignoring error if file does not exist.
+	while IFS=',' read -r hi name; do
+		scores["$hi"]="$name"
+	done 2>/dev/null < "$score_file"
+
+	if [[ -n $1 && $1 -gt 0 ]]; then
+		# If score > 0 then add the current name and score to the associative array.
+		scores["$1"]="$2"
+
+		# Sort scores in ascending order. Remove lowest if more than 10 entries.
+		sorted=($(for i in "${!scores[@]}"; do printf '%s\n' "$i"; done | sort -n))
+		[[ "${#sorted[@]}" -gt 10 ]] && unset sorted[0]
+
+		# Clear or create scores file.
+		> "$score_file"
+
+		# Write scores to file.
+		for i in "${!sorted[@]}"; do
+			hi="${sorted[$i]}"
+			printf '%d,%s\n' "$hi" "${scores[$hi]}" >> "$score_file"
+		done
+
+	elif [[ -z $1 ]]; then
+		# Sort scores in decending order for display.
+		sorted=($(for i in "${!scores[@]}"; do printf '%s\n' "$i"; done | sort -nr))
+
+		# Display score table.
+		color 10 cyan black
+		at 10 $((mid-7)) "TOP TEN PLAYERS"
+		color 00 cyan black
+		for i in $(seq 0 9); do
+			hi="${sorted[$i]}"
+			at $((12+2*i)) $((mid-12))
+			if [[ -z $hi ]]; then
+				# Fill empty slots with self.
+				printf '%07d  %16s' "0" "Blaster"
+			else
+				# Print score table entry.
+				printf '%07d  %16s' "$hi" "${scores[$hi]}"
+			fi
+		done
+		color off
+	fi
+}
+
+shoot() {
+	local i col
+
+	col=$((shot_pos+left))
+
+	# Laser visual effects.
+	case $shot_frame in
+		6)  # High intensity beam for 2 frames.
+			for ((i=$((base-1)); i>2; i--)); do
+				at $i $col; get_fgo laser1
+			done ;;
+
+		4)  # Low intensity beam for 2 frames.
+			for ((i=$((base-1)); i>2; i--)); do
+				at $i $col; get_fgo laser2
+			done ;;
+
+		2)  # Erase beam and cooldown for 2 frames.
+			for ((i=$((base-1)); i>2; i--)); do
+				at $i $col " "
+			done ;;
+
+		1)  # Collision check. Laser hits all enemies in its path. Set a flag here and
+			# the rest is handled in the update function.
+			for i in ${!aliens[@]}; do
+				[[ $shot_pos -ge $((i-1)) && $shot_pos -le $((i+1)) && -z ${hit[$i]} ]] && hit[$i]=2
+			done ;;
+
+		*) ;;
+	esac
+}
+
+update() {
+	local a_hit a_row a_col a_type a_pts
+
+	case $update_frame in
+		0)  # In frame 0 we scroll the screen and create background objects.
+
+			# Clear score, lives, and player ship so we can scroll the screen without
+			# artifacts. The shield bar is removed by the scrolling action.
+			do_score_bar off
+			do_life_bar off
+			at $base $((pos+left-1)) "   "
+
+			# Scroll screen and add a random background object.
+			get_bgo
+
+			# Redraw info after scroll.
+			at $base $((pos+left-1)); get_fgo player
+			do_score_bar
+			do_life_bar
+			do_shield_bar
+
+			[[ -n $debug ]] && _debug
+			;;
+
+		1)  # In frame 1 we create alien ships.
+
+			# Percent chance of an alien spawning this line.
+			[[ $spawn_chance -le $((RANDOM%100)) ]] && return
+
+			# Add some randomness to how fast the spawn chance increases.
+			[[ $((RANDOM%5)) -eq 0 && $spawn_chance -lt $spawn_max ]] && ((spawn_chance++))
+
+			# Generate alien position. Make sure column is not occupied already.
+			while true; do
+				a_col=$((2+RANDOM%(width-2)))
+				[[ -z ${aliens[$a_col]} ]] && break
+			done
+
+			# Add alien to array. Element is the line number this alien is on, starting at line 3.
+			aliens[$a_col]=3
+			at 3 $((a_col+left-1))
+
+			# Generate random alien type. Points awarded for a hit is based on how rare alien type is.
+			a_type=$((RANDOM%100))
+
+			if [[ $a_type -ge 95 && $spawn_chance -ge 25 && $rt_dist -eq 0 ]]; then
+				# Very rare, high value with shield regen. These appear when 25% spawn chance reached
+				# with a 5% chance to spawn and a distribution limit of 1 per 20 lines.
+				get_fgo alien4; data[$a_col]=${points[4]}
+				rt_dist=20
+
+			elif [[ $a_type -ge 80 && $a_type -lt 95 && $spawn_chance -ge 20 && $mt_dist -eq 0 ]]; then
+				# Rare, medium value with shield regen. These appear when 20% spawn chance reached
+				# with a 15% chance to spawn and a distribution limit of 1 per 10 lines.
+				get_fgo alien3; data[$a_col]=${points[3]}
+				mt_dist=10
+
+			elif [[ $a_type -ge 50 && $a_type -lt 80 && $spawn_chance -ge 15 && $ct_dist -eq 0 ]]; then
+				# Common, low value with shield regen. These appear when 15% spawn chance reached
+				# with a 30% chance to spawn and a distribution limit of 1 per 5 lines.
+				get_fgo alien2; data[$a_col]=${points[2]}
+				ct_dist=5
+
+			else
+				# Very common, low value, no shield regen. These have at least 50% chance to appear any
+				# time. Will also spawn in place of higher value ships until their chance threshold is
+				# reached or their distribution limit counter is active.
+				get_fgo alien1; data[$a_col]=${points[1]}
+
+			fi
+			;;
+
+		2)  # In frame 2 we do laser hit animations and score/shield update.
+
+			for a_col in ${!aliens[@]}; do
+				a_row=${aliens[$a_col]}
+				a_hit=${hit[$a_col]}
+				a_pts=${data[$a_col]}
+
+				[[ -z $a_hit ]] && continue
+
+				if [[ $a_hit -eq 2 ]]; then
+					# Alien hit with laser. Draw big debris and set flag to move down again.
+					at $a_row $((a_col+left-1)); get_fgo debris1
+					hit[$a_col]=1
+
+				elif [[ $a_hit -eq 1 ]]; then
+					# Debris is moving down. Draw small debris and set flag to move down one more line.
+					at $a_row $((a_col+left-1)); get_fgo debris2
+					hit[$a_col]=0
+
+				else
+					# Clear arrays and remove debris.
+					unset aliens[$a_col] data[$a_col] hit[$a_col]
+					at $a_row $((a_col+left-1)) "   "
+
+					# Add score and check for free life.
+					((score+=a_pts))
+					[[ ${#free[@]} -gt 0 ]] && [[ $score -ge ${free[-1]} ]] && { ((lives++)); unset free[-1]; }
+
+					# Recharge shield bar.
+					((shield+=a_pts/20))
+					[[ $shield -gt $shield_max ]] && shield=$shield_max
+				fi
+			done
+			;;
+
+		3)  # In frame 3 we do lander animations, player ded check, and advance aliens still in play.
+
+			for a_col in ${!aliens[@]}; do
+				a_row=${aliens[$a_col]}
+				a_hit=${hit[$a_col]}
+				a_pts=${data[$a_col]}
+
+				if [[ $a_row -eq $base && $a_col -ge $((pos-2)) && $a_col -le $((pos+2)) ]]; then
+					# Alien or debris collision with player. Debris can ded the player if the alien was
+					# hit close to the base line.
+					big_boom $((a_col+left-1)) fast
+					ded=true
+
+				elif [[ $a_row -gt $base && -z $a_hit ]]; then
+					# Alien made it past player and is heading for the livestock. Clear arrays and change
+					# ship to lander graphic. Debris can't land.
+					unset aliens[$a_col] data[$a_col] hit[$a_col]
+					at $a_row $((a_col+left-1))
+					case $a_pts in
+						${points[1]}) get_fgo lander1 ;;
+						${points[2]}) get_fgo lander2 ;;
+						${points[3]}) get_fgo lander3 ;;
+						${points[4]}) get_fgo lander4 ;;
+						*) ;;
+					esac
+
+					# Reduce shield bar. Make sure it doesn't go less than 0 or the bar display breaks.
+					((shield-=a_pts/45+1))
+					[[ $shield -le 0 ]] && shield=0 && ded=true
+
+				else
+					# Move down a line, ready for screen scroll in frame 0. Doing this here instead of
+					# after scrolling in frame 0 gives the player a chance for a near miss if they clip
+					# an alien while moving.
+					aliens[$a_col]=$((a_row+1))
+
+				fi
+			done
+
+			# Update distribution counters.
+			[[ $rt_dist -gt 0 ]] && ((rt_dist--))
+			[[ $mt_dist -gt 0 ]] && ((mt_dist--))
+			[[ $ct_dist -gt 0 ]] && ((ct_dist--))
+			;;
+
+		*) ;;
+	esac
+}
+
+_debug() {
+	# Debug stuff is displayed after screen scroll in frame 0 for smooth output.
+	printf "\e[1;1H$username\n"
+	printf 'tty=%3d %3d \n' $tty_rows $tty_cols
+	printf 'l/r=%3d %3d \n' $left $right
+	printf 'p/d=%3d %s  \n' $pos $dir
+	printf 'd_c=%2d %2d %2d \n' $rt_dist $mt_dist $ct_dist
+	printf 's_c=%2d         \n' $spawn_chance
+	for i in "${!aliens[@]}"
+		do printf '%3d %3d   \n' $i "${aliens[$i]}"
+	done
+	# Need 4 blank lines to clear 3 potential hits and the scrolled line.
+	printf "            \n            \n            \n            "
+}
+
+
+# Main =============================================================================================
+
+check_tty
+
+# Process command line.
+cmdline $@
+
+# First run game settings.
+init_game
+
+# Start outer loop where intro/outro screens are displayed.
+while true; do
+
+	# Show intro screen with high score table and other infos.
+	game_intro
+
+	# Start main game loop.
+	init_level start
+	while true; do
+		# Get a keypress if waiting else return after a short timeout. This is the game speed control.
+		key=$(key_read $frame_rate)
+
+		case $key in
+			"left")
+				[[ $dir -eq -1 ]] && dir=0 || dir=-1 ;;
+
+			"right")
+				[[ $dir == 1 ]] && dir=0 || dir=1 ;;
+
+			"shoot")
+				[[ $shot_frame -eq 0 ]] && { dir=0; shot_frame=6; shot_pos=$pos; } ;;
+
+			"rapid")
+				[[ $shot_frame -eq 0 ]] && { shot_frame=6; shot_pos=$pos; } ;;
+
+			"p")
+				key_wait "p" >/dev/null ;;
+
+			"1")
+				[[ -n $debug ]] && shield=$shield_max ;;
+
+			"2")
+				[[ -n $debug && $spawn_chance -lt $spawn_max ]] && ((spawn_chance++)) ;;
+
+			"q")
+				break ;;
+
+			*) ;;
+		esac
+
+		# Scroll screen, update background and alien graphics, do laser hit and collision checks.
+		update; ((update_frame=(update_frame+1)%4))
+
+		if [[ $ded != true ]]; then
+			# Player movement is done after every update frame which is 4:1 ratio to aliens. Only move
+			# if laser beam is not active. This causes rapid fire to slow movement down.
+			if [[ $shot_frame -le 2 ]]; then
+				last=$pos; ((pos+=dir))
+				[[ $pos -lt $pmin || $pos -gt $pmax ]] && { pos=$last; dir=0; }
+
+				# Erase ship from old position only if it moved. Prevents flicker.
+				[[ $last -ne $pos ]] && at $base $((last+left-1)) "   "
+				at $base $((pos+left-1)); get_fgo player
+			fi
+
+			# Fire the laser. Animation takes 4 frames with 2 frames cooldown for 1.5 update cycles.
+			[[ $shot_frame -gt 0 ]] && { shoot; ((shot_frame--)); }
+
+		else
+			# Clear laser and update bars before big boom.
+			shot_frame=2; shoot
+			do_score_bar
+			do_shield_bar
+
+			big_boom $((pos+left-1))
+			sleep 1
+
+			((lives--))
+			[[ $lives -gt 0 ]] && init_level || break
+		fi
+
+	done
+
+	# Show game over message.
+	game_over
+done
+
+# Should never reach here. Normal exit is handled in game_intro and game_over functions.
+exit 3
+
+
+# Help text ========================================================================================
+#
+# This is read by the awk command up top and displayed by section name with the leading # removed.
+#
+#[options]
+#
+#Command line options:
+#
+#    -h[elp]  Show this page or extended help pages.
+#
+#    -g<num>  Set game speed from 1-3, default is 2.
+#
+#    -k       Change ship control keys if your keyboard has non standard codes or you
+#             just prefer to use different keys.
+#
+#    -n       No color graphics. Some folks like things in B&W, or maybe your terminal
+#             doesn't support color.
+#
+#    -s<e|h>  Skill level easier or harder. See section in extended help for details.
+#
+#    -u<name> Set player name for high score table. Default is your account username.
+#
+#    -v       Show game version.
+#
+#[howto]
+#
+#How to Play
+#
+#    Fly your ship into battle against hordes of invading alien attackers. Your job as
+#    commander of Blast Force One is to repel them for as long as possible at any cost.
+#    Use your ship's weapon to blow their shit up before they can land and abduct your
+#    livestock. The longer you hold out the more ships they send. There are no mother
+#    ships, no boss fights, just masses of attackers that will eventually overwhelm you.
+#
+#    Your weapon is a massive laser. This overpowered device destroys everything in its
+#    path. Multiple aliens can be instantly deconstructed in one shot. The weapon has two
+#    modes of dealing out death and destruction. Precision mode stops your ship at its
+#    current position before firing to get a more accurate target lock on an alien. Rapid
+#    mode fires as you move, as fast as the laser can recharge. Hold the button down for
+#    maximum carnage.
+#
+#    There is a planetary shield that depletes every time an alien ship gets thru your
+#    defenses. Some alien types do more shield damage than others, but they also recharge
+#    the shield when you destroy them. Look out for the rare ones. If your shield fails
+#    you lose a life.
+#
+#    Strategy to consider:
+#
+#    Choose your targets carefully when things get crazy. Sometimes it's better to wait
+#    for a break.
+#
+#    Be wary of debris from destroyed alien ships. It's just as damaging in a collision
+#    until it breaks up fully.
+#
+#    Your ship movement slows down while rapid firing due to the insane amount of energy
+#    required. Godo timing is needed to avoid collisions.
+#
+#[skill]
+#
+#Skill Levels
+#
+#    Easier - Start with 4 lives
+#             Free life every 10000, up to 50000 points
+#             Slower start to the invasion
+#             Smaller maximum horde
+#
+#    Normal - Start with 4 lives
+#             Free life at 10000, 25000, and 40000 points
+#
+#    Harder - Start with 3 lives
+#             Free life at 15000 and 30000 points
+#             Faster start to the invasion
+#             Larger maximum horde
+#             Smaller shield
+#
+#    See in game intro screen for point values and shield penalties.
+#
+#[controls]
+#
+#Controls
+#
+#    Cursor left or right starts your ship moving in that direction. Press again to stop.
+#
+#    Space is the massive laser precision fire key.
+#
+#    Cursor up is the massive laser rapid fire key.
+#
+#    P pauses the game. Press again to resume.
+#
+#    Q quits and returns to the intro screen or shell.
+#
+#    Note: Different movement and fire keys can be assigned. See -k option.
+#
+#[end]
