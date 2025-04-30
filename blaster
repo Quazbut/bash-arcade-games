@@ -31,7 +31,7 @@ _name=$(basename "$0")
 _path=$(dirname "$0")
 
 _title="Blaster"
-_ver="1.25"
+_ver="1.26"
 
 # Sides of play area.
 edge="|"
@@ -258,15 +258,15 @@ do_life_bar() {
 	# Show or hide remaining lives.
 	local i len str
 
-	# Adjust how many are displayed for intro/outro screens.
+	# Adjust how many are displayed for intro screen or in play.
 	case $1 in
-		"all")
-			str=$(get_fgo player)
-			len=$start_lives ;;
-
 		"off")
 			str="    "
 			len=$lives ;;
+
+		"all")
+			str=$(get_fgo player)
+			len=$start_lives ;;
 
 		*)
 			# Display one less up top because we count the life in play.
@@ -447,14 +447,14 @@ init_game() {
 		"n") # Normal
 			start_lives=4
 			shield_max=45
-			spawn_start=5
+			spawn_start=6
 			spawn_max=50
 			declare -ga free=(40000 25000 10000) ;;
 
 		"h") # Harder
 			start_lives=3
 			shield_max=40
-			spawn_start=6
+			spawn_start=8
 			spawn_max=60
 			declare -ga free=(30000 15000) ;;
 
