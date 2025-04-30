@@ -28,7 +28,7 @@
 # Constants ========================================================================================
 
 _title="Robot Deathmatch"
-_ver="2.31"
+_ver="2.32"
 
 _name=$(basename "$0")
 _path=$(dirname "$0")
@@ -244,6 +244,8 @@ game_over() {
 	# Display a game over message.
 	local mid_row=$((arena_rows/2)) mid_col=$((arena_cols/2+arena_cols%2-3))
 
+	[[ -z $fast_intro ]] && sleep 1
+
 	[[ -z $no_color ]] && printf "${colors[outro]}"
 
 	print_at $((mid_row-1)) $((mid_col)) "                 "
@@ -430,8 +432,6 @@ make_robots() {
 		arena[$key]=$robot
 		object show $key
    	done
-
-	[[ -n $repeat_key ]] && sleep .2
 
 	# Display list of coordinates if not intro screen. Arg can be intro, start, or null.
 	[[ $2 != "intro" ]] && object list
