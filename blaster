@@ -31,7 +31,7 @@ _name=$(basename "$0")
 _path=$(dirname "$0")
 
 _title="Blaster"
-_ver="1.26"
+_ver="1.27"
 
 # Sides of play area.
 edge="|"
@@ -231,6 +231,8 @@ big_boom() {
 	[[ -z $2 ]] && sleep $boom_rate
 
 	at $base $1 "   "
+
+	[[ -z $2 ]] && sleep 1
 }
 
 color() {
@@ -256,23 +258,11 @@ color() {
 
 do_life_bar() {
 	# Show or hide remaining lives.
-	local i len str
+	local i len str=$(get_fgo player)
 
-	# Adjust how many are displayed for intro screen or in play.
-	case $1 in
-		"off")
-			str="    "
-			len=$lives ;;
+	# Display all lives on intro screen or one less when playing as we count the life in play.
 
-		"all")
-			str=$(get_fgo player)
-			len=$start_lives ;;
-
-		*)
-			# Display one less up top because we count the life in play.
-			str=$(get_fgo player)
-			len=$((lives-1)) ;;
-	esac
+	[[ $1 == "all" ]] && len=$start_lives || ((len=lives-1))
 
 	# Display string centered on line 2.
 	at 2 $((mid-(4*len/2-1)))
@@ -290,9 +280,8 @@ do_shield_bar() {
 }
 
 do_score_bar() {
-	# Show or hide score centered on first line.
-	at 1 $((mid-3))
-	[[ -z $1 ]] && printf '%07d' "$score" || printf '%*s' 7
+	# Show score centered on first line.
+	at 1 $((mid-3)) '%07d' "$score"
 }
 
 do_wipe() {
@@ -300,11 +289,8 @@ do_wipe() {
 	local i
 	# Wait for keyboard buffer to clear.
 	key_clear
-	# Hide score and lives because it looks nicer.
-	do_score_bar off
-	do_life_bar off
 
-	for i in $(seq 1 $tty_rows); do
+	for i in $(seq $tty_rows); do
 		get_bgo
 		sleep 0.01
 	done
@@ -333,10 +319,10 @@ game_info() {
 		at 16 $m; printf '%3s%11d%+11d' "${object[alien2]}" "${points[2]}" "$((points[2]/20))"
 		at 18 $m; printf '%3s%11d%+11d' "${object[alien3]}" "${points[3]}" "$((points[3]/20))"
 		at 20 $m; printf '%3s%11d%+11d' "${object[alien4]}" "${points[4]}" "$((points[4]/20))"
-		at 24 $m; printf '%3s%+22d' "${object[lander1]}" "$((points[1]/45+1))"
-		at 26 $m; printf '%3s%+22d' "${object[lander2]}" "$((points[2]/45+1))"
-		at 28 $m; printf '%3s%+22d' "${object[lander3]}" "$((points[3]/45+1))"
-		at 30 $m; printf '%3s%+22d' "${object[lander4]}" "$((points[4]/45+1))"
+		at 24 $m; printf '%3s%22d' "${object[lander1]}" "-$((points[1]/45+1))"
+		at 26 $m; printf '%3s%22d' "${object[lander2]}" "-$((points[2]/45+1))"
+		at 28 $m; printf '%3s%22d' "${object[lander3]}" "-$((points[3]/45+1))"
+		at 30 $m; printf '%3s%22d' "${object[lander4]}" "-$((points[4]/45+1))"
 
 		color off
 
@@ -397,13 +383,16 @@ game_over() {
 }
 
 get_bgo() {
+	# Clear top lines so we can scroll without leaving artifacts.
+	at 2 $((left+1)) "$blank_str"
+	at 1 $((left+1)) "$blank_str"
+
 	# Scroll with Esc-M ANSI code which moves cursor up one line, scrolling if at top of screen,
 	# and draw play area edges on inserted line.
 	at 1 $left "\eM$edge$blank_str$edge"
 
 	# Generate random background object. Objects start on line 3 or score/lives update clears it.
-	local col=$((2+RANDOM%(width-2)+left))
-	at 3 $col
+	at 3 $((2+RANDOM%(width-2)+left))
 
 	case $((RANDOM%50)) in
 		0)
@@ -478,22 +467,22 @@ init_game() {
 	frame_rate=$(awk -v num="$((speed+1))" 'BEGIN { print num / 100 }')
 
 	# Scale game a bit to fit tty. Play area is min 60 and max 80 cols wide.
-	mid=$((tty_cols/2))
+	((mid=tty_cols/2))
 	if [[ $tty_cols -lt 84 ]]; then
 		left=2
-		right=$((tty_cols-1))
+		((right=tty_cols-1))
 	else
-		left=$((mid-40))
-		right=$((mid+41))
+		((left=mid-40))
+		((right=mid+41))
 	fi
 
 	# Interior width of the play area.
-	width=$((right-left-1))
+	((width=right-left-1))
 
 	# Base is where our ship moves, pmin and pmax are just a nice reference to use the center of
 	# our 3 char wide ship as the alignment point.
-	base=$((tty_rows-5))
-	pmin=2; pmax=$((width-1))
+	((base=tty_rows-5))
+	pmin=2; ((pmax=width-1))
 
 	# String of blanks used to clear a line between play area edges.
 	blank_str=$(printf '%*s' $width)
@@ -510,7 +499,7 @@ init_level() {
 	[[ -n $1 ]] && { score=0; lives=$start_lives; }
 
 	# Place player stopped in center to start.
-	pos=$((width/2))
+	((pos=width/2))
 	dir=0
 
 	# Set true when player collides with alien or shield bar runs out.
@@ -675,15 +664,13 @@ update() {
 	local a_hit a_row a_col a_type a_pts
 
 	case $update_frame in
-		0)  # In frame 0 we scroll the screen and create background objects.
+		0)  # In frame 0 we scroll the screen, create background objects, and move alien ships down.
 
-			# Clear score, lives, and player ship so we can scroll the screen without
-			# artifacts. The shield bar is removed by the scrolling action.
-			do_score_bar off
-			do_life_bar off
+			# Clear player ship so we can scroll the screen without artifacts. Score and lives
+			# are cleared in get_bgo function, and shield bar is removed by the scrolling action.
 			at $base $((pos+left-1)) "   "
 
-			# Scroll screen and add a random background object.
+			# Clear score and lives, scroll screen, add a random background object.
 			get_bgo
 
 			# Redraw info after scroll.
@@ -691,6 +678,11 @@ update() {
 			do_score_bar
 			do_life_bar
 			do_shield_bar
+
+			for a_col in ${!aliens[@]}; do
+				a_row=${aliens[$a_col]}
+				aliens[$a_col]=$((a_row+1))
+			done
 
 			[[ -n $debug ]] && _debug
 			;;
@@ -705,7 +697,7 @@ update() {
 
 			# Generate alien position. Make sure column is not occupied already.
 			while true; do
-				a_col=$((2+RANDOM%(width-2)))
+				((a_col=2+RANDOM%(width-2)))
 				[[ -z ${aliens[$a_col]} ]] && break
 			done
 
@@ -778,7 +770,7 @@ update() {
 			done
 			;;
 
-		3)  # In frame 3 we do lander animations, player ded check, and advance aliens still in play.
+		3)  # In frame 3 we do lander animations and player ded check.
 
 			for a_col in ${!aliens[@]}; do
 				a_row=${aliens[$a_col]}
@@ -807,13 +799,6 @@ update() {
 					# Reduce shield bar. Make sure it doesn't go less than 0 or the bar display breaks.
 					((shield-=a_pts/45+1))
 					[[ $shield -le 0 ]] && shield=0 && ded=true
-
-				else
-					# Move down a line, ready for screen scroll in frame 0. Doing this here instead of
-					# after scrolling in frame 0 gives the player a chance for a near miss if they clip
-					# an alien while moving.
-					aliens[$a_col]=$((a_row+1))
-
 				fi
 			done
 
@@ -870,7 +855,7 @@ while true; do
 				[[ $dir -eq -1 ]] && dir=0 || dir=-1 ;;
 
 			"right")
-				[[ $dir == 1 ]] && dir=0 || dir=1 ;;
+				[[ $dir -eq 1 ]] && dir=0 || dir=1 ;;
 
 			"shoot")
 				[[ $shot_frame -eq 0 ]] && { dir=0; shot_frame=6; shot_pos=$pos; } ;;
@@ -896,34 +881,29 @@ while true; do
 		# Scroll screen, update background and alien graphics, do laser hit and collision checks.
 		update; ((update_frame=(update_frame+1)%4))
 
-		if [[ $ded != true ]]; then
-			# Player movement is done after every update frame which is 4:1 ratio to aliens. Only move
-			# if laser beam is not active. This causes rapid fire to slow movement down.
-			if [[ $shot_frame -le 2 ]]; then
-				last=$pos; ((pos+=dir))
-				[[ $pos -lt $pmin || $pos -gt $pmax ]] && { pos=$last; dir=0; }
+		# Player movement is done after every update frame which is 4:1 ratio to aliens. Only move
+		# if laser beam is not active. This causes rapid fire to slow movement down.
+		if [[ $shot_frame -le 2 && $dir -ne 0 ]]; then
+			last=$pos; ((pos+=dir))
+			[[ $pos -lt $pmin || $pos -gt $pmax ]] && pos=$last
+			# Erase ship from old position if it moved.
+			[[ $last -ne $pos ]] && at $base $((last+left-1)) "   "
+			at $base $((pos+left-1)); get_fgo player
+		fi
 
-				# Erase ship from old position only if it moved. Prevents flicker.
-				[[ $last -ne $pos ]] && at $base $((last+left-1)) "   "
-				at $base $((pos+left-1)); get_fgo player
-			fi
+		# Fire the laser. Animation takes 4 frames with 2 frames cooldown for 1.5 update cycles.
+		[[ $shot_frame -gt 0 ]] && { shoot; ((shot_frame--)); }
 
-			# Fire the laser. Animation takes 4 frames with 2 frames cooldown for 1.5 update cycles.
-			[[ $shot_frame -gt 0 ]] && { shoot; ((shot_frame--)); }
-
-		else
+		if [[ $ded == true ]]; then
 			# Clear laser and update bars before big boom.
 			shot_frame=2; shoot
 			do_score_bar
 			do_shield_bar
 
 			big_boom $((pos+left-1))
-			sleep 1
 
-			((lives--))
-			[[ $lives -gt 0 ]] && init_level || break
+			((lives--)); [[ $lives -gt 0 ]] && init_level || break
 		fi
-
 	done
 
 	# Show game over message.
