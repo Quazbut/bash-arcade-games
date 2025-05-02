@@ -31,7 +31,7 @@ _name=$(basename "$0")
 _path=$(dirname "$0")
 
 _title="Blaster"
-_ver="1.27"
+_ver="1.28"
 
 # Sides of play area.
 edge="|"
@@ -218,7 +218,7 @@ at() {
 }
 
 big_boom() {
-	# Big animated boom on player collision. Aliens boom fast, player slower.
+	# Big animated boom on collision. Aliens boom fast, player slower.
 	local boom_rate=$(awk -v num="$((speed+1))" 'BEGIN { print num / 20 }')
 
 	at $base $1; get_fgo boom
@@ -242,9 +242,8 @@ color() {
 	# Clear the text color.
 	[[ $1 == "off" ]] && { printf "\e[0m"; return; }
 
-	local fg_i bg_i
-
 	# Intensity is a 2 bit flag, 1 for bright, 0 for normal.
+	local fg_i bg_i
 	[[ ${1:0:1} -eq 1 ]] && fg_i="9" || fg_i="3"
 	[[ ${1:1:1} -eq 1 ]] && bg_i="10" || bg_i="4"
 
@@ -257,11 +256,8 @@ color() {
 }
 
 do_life_bar() {
-	# Show or hide remaining lives.
+	# Show all lives on intro screen or one less when playing as we count the life in play.
 	local i len str=$(get_fgo player)
-
-	# Display all lives on intro screen or one less when playing as we count the life in play.
-
 	[[ $1 == "all" ]] && len=$start_lives || ((len=lives-1))
 
 	# Display string centered on line 2.
@@ -285,11 +281,11 @@ do_score_bar() {
 }
 
 do_wipe() {
-	# Clear the play area with a full screen of scrolling background.
-	local i
 	# Wait for keyboard buffer to clear.
 	key_clear
 
+	# Clear the play area with a full screen of scrolling background.
+	local i
 	for i in $(seq $tty_rows); do
 		get_bgo
 		sleep 0.01
@@ -297,16 +293,15 @@ do_wipe() {
 }
 
 game_info() {
-	# Display various game infos on intro screen.
-
-	local i
 	# Clear old info.
 	at 10 $((mid-7)) '%*s' 16
+	local i
 	for i in $(seq 0 9); do
 		at $((12+2*i)) $((mid-12))
 		printf '%*s' 25
 	done
 
+	# Display various game infos on intro screen.
 	if [[ $1 == "points" ]]; then
 		local m=$((mid-12))
 
@@ -340,10 +335,8 @@ game_info() {
 }
 
 game_intro() {
-	# Clear screen. Display title, last score, lives for this skill level, press a key message.
+	# Clear screen and show title, press a key, last score, lives for this skill level.
 	do_wipe
-	do_score_bar
-	do_life_bar all
 
 	color 10 white red
 	at 7 $((mid-5)) "  BLASTER  "
@@ -351,7 +344,10 @@ game_intro() {
 	color off
 	at 34 $((mid-6)) "Press any key!"
 
-	# Rotating info display.
+	do_score_bar
+	do_life_bar all
+
+	# Rotating display shows high scores, scoring info, credits.
 	local i=0 p key
 	while [[ -z $key ]]; do
 		case $i in
@@ -371,11 +367,12 @@ game_intro() {
 game_over() {
 	# Clear screen and display game over message.
 	do_wipe
+
 	color 10 white red
 	at $((tty_rows/2)) $((mid-7)) "   GAME OVER   "
 	color off
 
-	# Update high score table with current username and score, but do not display.
+	# Update high score table with current username and score.
 	score_tab $score $username
 
 	# Display message for 2 seconds or until player presses a key.
@@ -391,9 +388,8 @@ get_bgo() {
 	# and draw play area edges on inserted line.
 	at 1 $left "\eM$edge$blank_str$edge"
 
-	# Generate random background object. Objects start on line 3 or score/lives update clears it.
+	# Generate random background object on line 3.
 	at 3 $((2+RANDOM%(width-2)+left))
-
 	case $((RANDOM%50)) in
 		0)
 			printf "o" ;;
@@ -421,7 +417,8 @@ init_game() {
 	[[ -z $skill ]] && skill="n"
 	[[ -z $speed ]] && speed=2
 	[[ -z $username ]] && username="${USER//[![:alnum:]]/}"
-	# Truncate username to 16 characters.
+
+	# Truncate username to 16 characters so it fits the score table.
 	username=$(printf '%.16s' "$username")
 
 	# Settings for the skill levels.
@@ -447,7 +444,7 @@ init_game() {
 			spawn_max=60
 			declare -ga free=(30000 15000) ;;
 
-		*)    ;;
+		*) ;;
 	esac
 
 	# Default keys are left, right, up, space.
@@ -499,8 +496,7 @@ init_level() {
 	[[ -n $1 ]] && { score=0; lives=$start_lives; }
 
 	# Place player stopped in center to start.
-	((pos=width/2))
-	dir=0
+	((pos=width/2)); dir=0
 
 	# Set true when player collides with alien or shield bar runs out.
 	ded=false
@@ -513,8 +509,7 @@ init_level() {
 	spawn_chance=$spawn_start
 
 	# Distribution counters used in addition to a random number generator to prevent spawns of the
-	# same type of alien too close to each other. These are set in frame 1 when an alien spawns and
-	# count down in frame 3 after surviving aliens advance.
+	# same type of alien too close to each other.
 	rt_dist=0 # Rare type 1 in 20 lines
 	mt_dist=0 # Medium type 1 in 10 lines
 	ct_dist=0 # Common type 1 in 5 lines
@@ -539,9 +534,8 @@ key_clear() {
 }
 
 key_read() {
-	local key
-
 	# Get input if key is waiting else timeout.
+	local key
 	read -rs -N 1 -t $1 key
 	[[ -z $key ]] && return
 
@@ -554,19 +548,20 @@ key_read() {
 }
 
 key_wait() {
+	# Wait for a key press.
 	local key
-
 	if [[ -n $1 ]]; then
-		# Wait for a key in $1 set.
+		# Key in $1 set.
 		while true; do
 			read -rs -N 1 key
 			[[ $1 == *$key* ]] && break
 		done
 	else
-		# Wait for any key.
+		# Any key.
 		while true; do
 			read -rs -N 1 key
 			[[ $key == $'\x1b' ]] && read -rs -N 2 -t 0.001 key && read -rs -N 1 -t 0.001
+
 			# Ignore any non-printable keys.
 			[[ -n ${key//[![:print:]]/} ]] && break
 		done
@@ -575,19 +570,18 @@ key_wait() {
 }
 
 score_tab() {
-	local i hi name
-	local score_file="$_path/scores.bla"
-
 	# Create associative array to hold high score table with score as key and name as element.
 	declare -A scores=()
 	# Create normal array for sorting.
 	declare -a sorted=()
 
 	# Read the score file into an associative array, ignoring error if file does not exist.
+	local hi name score_file="$_path/scores.bla"
 	while IFS=',' read -r hi name; do
 		scores["$hi"]="$name"
 	done 2>/dev/null < "$score_file"
 
+	local i
 	if [[ -n $1 && $1 -gt 0 ]]; then
 		# If score > 0 then add the current name and score to the associative array.
 		scores["$1"]="$2"
@@ -596,10 +590,8 @@ score_tab() {
 		sorted=($(for i in "${!scores[@]}"; do printf '%s\n' "$i"; done | sort -n))
 		[[ "${#sorted[@]}" -gt 10 ]] && unset sorted[0]
 
-		# Clear or create scores file.
+		# Clear or create file and write scores.
 		> "$score_file"
-
-		# Write scores to file.
 		for i in "${!sorted[@]}"; do
 			hi="${sorted[$i]}"
 			printf '%d,%s\n' "$hi" "${scores[$hi]}" >> "$score_file"
@@ -629,11 +621,8 @@ score_tab() {
 }
 
 shoot() {
-	local i col
-
-	col=$((shot_pos+left))
-
 	# Laser visual effects.
+	local i col=$((shot_pos+left))
 	case $shot_frame in
 		6)  # High intensity beam for 2 frames.
 			for ((i=$((base-1)); i>2; i--)); do
@@ -661,10 +650,11 @@ shoot() {
 }
 
 update() {
+	# Main game logic and display output function.
 	local a_hit a_row a_col a_type a_pts
 
 	case $update_frame in
-		0)  # In frame 0 we scroll the screen, create background objects, and move alien ships down.
+		0)  # In frame 0 we scroll the screen, create background objects, and move alien ships.
 
 			# Clear player ship so we can scroll the screen without artifacts. Score and lives
 			# are cleared in get_bgo function, and shield bar is removed by the scrolling action.
@@ -679,6 +669,7 @@ update() {
 			do_life_bar
 			do_shield_bar
 
+			# Move alien ships down a line.
 			for a_col in ${!aliens[@]}; do
 				a_row=${aliens[$a_col]}
 				aliens[$a_col]=$((a_row+1))
@@ -728,8 +719,8 @@ update() {
 
 			else
 				# Very common, low value, no shield regen. These have at least 50% chance to appear any
-				# time. Will also spawn in place of higher value ships until their chance threshold is
-				# reached or their distribution limit counter is active.
+				# time. Will also spawn in place of higher value ships if under their chance threshold
+				# or their distribution limit counter is active.
 				get_fgo alien1; data[$a_col]=${points[1]}
 
 			fi
@@ -770,7 +761,7 @@ update() {
 			done
 			;;
 
-		3)  # In frame 3 we do lander animations and player ded check.
+		3)  # In frame 3 we do lander animations, player ded check, and update distribution counters.
 
 			for a_col in ${!aliens[@]}; do
 				a_row=${aliens[$a_col]}
@@ -830,6 +821,7 @@ _debug() {
 
 # Main =============================================================================================
 
+# Make sure game will fit on screen.
 check_tty
 
 # Process command line.
@@ -886,6 +878,7 @@ while true; do
 		if [[ $shot_frame -le 2 && $dir -ne 0 ]]; then
 			last=$pos; ((pos+=dir))
 			[[ $pos -lt $pmin || $pos -gt $pmax ]] && pos=$last
+
 			# Erase ship from old position if it moved.
 			[[ $last -ne $pos ]] && at $base $((last+left-1)) "   "
 			at $base $((pos+left-1)); get_fgo player
@@ -932,7 +925,7 @@ exit 3
 #    -n       No color graphics. Some folks like things in B&W, or maybe your terminal
 #             doesn't support color.
 #
-#    -s<e|h>  Skill level easier or harder. See section in extended help for details.
+#    -s<e|h>  Skill level easier or harder. See extended help for details.
 #
 #    -u<name> Set player name for high score table. Default is your account username.
 #
