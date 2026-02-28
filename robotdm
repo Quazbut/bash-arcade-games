@@ -24,7 +24,6 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-
 # Constants ========================================================================================
 
 _title="Robot Deathmatch"
@@ -66,7 +65,6 @@ color_off="\e[0m"
 curs_off="\e[?25l"
 curs_on="\e[?25h"
 
-
 # Initial Setup ====================================================================================
 
 check_tty() {
@@ -96,7 +94,6 @@ on_exit() {
 	stty $stty_old
 	printf $curs_on
 }
-
 
 # Command Line Functions ===========================================================================
 
@@ -200,7 +197,6 @@ show_help() {
 	done
 }
 
-
 # Game Functions ===================================================================================
 
 game_intro() {
@@ -275,6 +271,8 @@ init_game() {
 	declare -gA kc=(
 		["NORTH"]="[A" ["SOUTH"]="[B" ["WEST"]="[D" ["EAST"]="[C"
 		["NORTHWEST"]="[H" ["SOUTHWEST"]="[F" ["NORTHEAST"]="[5" ["SOUTHEAST"]="[6"
+		["VIMNORTH"]="k" ["VIMSOUTH"]="j" ["VIMWEST"]="h" ["VIMEAST"]="l"
+		["VIMNORTHWEST"]="y" ["VIMSOUTHWEST"]="b" ["VIMNORTHEAST"]="u" ["VIMSOUTHEAST"]="n"
 		["WAIT"]=" " ["REPEAT"]="r" ["TELEPORT"]="t" ["EMP"]="e"
 	)
 
@@ -537,21 +535,21 @@ move_player() {
 
 	# Process input.
 	case ${inp^^} in
-		"NORTH")
+		"NORTH" | "VIMNORTH")
 			((player_row--)) ;;
-		"SOUTH")
+		"SOUTH" | "VIMSOUTH")
 			((player_row++)) ;;
-		"WEST")
+		"WEST" | "VIMWEST")
 			((player_col--)) ;;
-		"EAST")
+		"EAST" | "VIMEAST")
 			((player_col++)) ;;
-		"NORTHWEST")
+		"NORTHWEST" | "VIMNORTHWEST")
 			((player_col--)) && ((player_row--)) ;;
-		"NORTHEAST")
+		"NORTHEAST" | "VIMNORTHEAST")
 			((player_col++)) && ((player_row--)) ;;
-		"SOUTHWEST")
+		"SOUTHWEST" | "VIMSOUTHWEST")
 			((player_col--)) && ((player_row++)) ;;
-		"SOUTHEAST")
+		"SOUTHEAST" | "VIMSOUTHEAST")
 			((player_col++)) && ((player_row++)) ;;
 
 		"WAIT")
@@ -859,7 +857,6 @@ _key() {
 	# zero. This simulates a 2 dimensional array while not actually being one.
 	printf '%02d,%02d' $1 $2
 }
-
 
 # Main =============================================================================================
 
